@@ -10,6 +10,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY scripts ./scripts
+COPY samples ./samples
 
 RUN useradd --system --uid 10001 --home /srv appuser \
     && mkdir -p /data \

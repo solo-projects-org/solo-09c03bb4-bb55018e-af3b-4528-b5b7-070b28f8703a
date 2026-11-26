@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS monthly_summary (
     updated_at    TEXT NOT NULL
 );
 
+-- Monotonic per-month change counter. Every newly stored report revision bumps
+-- the counter of its sample's month in the same write transaction. A rebuild
+-- captures the counter, recomputes outside the write lock, then re-checks it
+-- while holding BEGIN IMMEDIATE. A mismatch means a same-month revision landed
+-- in between, so the plan is recomputed; changes in other months leave this
+-- month's counter untouched and therefore cannot invalidate the rebuild.
+CREATE TABLE IF NOT EXISTS month_generation (
+    month      TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS monthly_lower_hist (
     month        TEXT NOT NULL,
     value        INTEGER NOT NULL CHECK (value >= 0),

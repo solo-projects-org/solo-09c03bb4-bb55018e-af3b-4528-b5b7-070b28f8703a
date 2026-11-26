@@ -12,5 +12,31 @@ services:
       - tp-data:/data
     restart: unless-stopped
 
+  # One-shot demo loader: restores a legacy backup sample for 2026-10 whose
+  # lab-report originals are complete but whose derived summary is stale.
+  # Open Swagger, call POST /months/2026-10/rebuild, then GET /summary.
+  # Kept behind a profile so a normal `docker compose up` never replays the
+  # stale summary over an already rebuilt month.
+  legacy-sample:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: tp-check:1.0.0
+    command:
+      - python
+      - scripts/load_legacy_sample.py
+      - samples/legacy_2026-10.json
+      - --db
+      - /data/tp.sqlite3
+    environment:
+      TP_DB_PATH: /data/tp.sqlite3
+    volumes:
+      - tp-data:/data
+    depends_on:
+      tp-check:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   tp-data:

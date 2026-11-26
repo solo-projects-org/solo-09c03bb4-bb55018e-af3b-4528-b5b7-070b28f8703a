@@ -1,0 +1,96 @@
+{
+  "note": "旧备份样例：化验单原件已补齐（含每张单的最高修订），但 sample_state / monthly_summary / 直方图仍是旧备份里的旧分母与旧名单。装载后到 Swagger 调用 POST /months/2026-10/rebuild 即可重建，再用 GET /summary?month=2026-10&threshold=20 查询。",
+  "month": "2026-10",
+  "threshold_example": 20,
+  "samples": [
+    {
+      "sample_no": "S-2026-10-01",
+      "reports": [
+        {
+          "report_no": "LAB-10-A-01",
+          "revision": 1,
+          "result": {"kind": "measured", "lower": 99, "upper": 100}
+        },
+        {
+          "report_no": "LAB-10-A-01",
+          "revision": 2,
+          "result": {"kind": "measured", "lower": 35, "upper": 45}
+        }
+      ]
+    },
+    {
+      "sample_no": "S-2026-10-02",
+      "reports": [
+        {
+          "report_no": "LAB-10-B-01",
+          "revision": 1,
+          "result": {"kind": "nondetect", "detection_limit": 20}
+        },
+        {
+          "report_no": "LAB-10-B-02",
+          "revision": 1,
+          "result": {"kind": "measured", "lower": 25, "upper": 30}
+        }
+      ]
+    },
+    {
+      "sample_no": "S-2026-10-03",
+      "reports": [
+        {
+          "report_no": "LAB-10-C-01",
+          "revision": 1,
+          "result": {"kind": "measured", "lower": 10, "upper": 20}
+        },
+        {
+          "report_no": "LAB-10-C-02",
+          "revision": 1,
+          "result": {"kind": "measured", "lower": 15, "upper": 25}
+        }
+      ]
+    },
+    {
+      "sample_no": "S-2026-10-04",
+      "reports": [
+        {
+          "report_no": "LAB-10-D-01",
+          "revision": 1,
+          "result": {"kind": "measured", "lower": 50, "upper": 60}
+        }
+      ]
+    },
+    {
+      "sample_no": "S-2026-10-05",
+      "reports": [
+        {
+          "report_no": "LAB-10-E-01",
+          "revision": 1,
+          "result": {"kind": "measured", "lower": 80, "upper": 90}
+        }
+      ]
+    }
+  ],
+  "stale_derived": {
+    "note": "旧备份中的派生结果：S-2026-10-05 被错误列为待复测并从分母漏掉，S-2026-10-01 仍按旧修订 99..100 计数。",
+    "state": [
+      {"sample_no": "S-2026-10-01", "status": "ok", "lower": 99, "upper": 100, "upper_inclusive": true},
+      {"sample_no": "S-2026-10-02", "status": "retest"},
+      {"sample_no": "S-2026-10-03", "status": "ok", "lower": 15, "upper": 20, "upper_inclusive": true},
+      {"sample_no": "S-2026-10-04", "status": "ok", "lower": 50, "upper": 60, "upper_inclusive": true},
+      {"sample_no": "S-2026-10-05", "status": "retest"}
+    ],
+    "denominator": 3,
+    "retest_count": 2,
+    "lower_hist": [[15, 1], [50, 1], [99, 1]],
+    "max_hist": [[20, 1], [60, 1], [100, 1]]
+  },
+  "expected_after_rebuild": {
+    "total_samples": 5,
+    "denominator": 4,
+    "retest_count": 1,
+    "retest_samples": ["S-2026-10-02"],
+    "threshold_20": {
+      "at_or_above_lower_bound": 3,
+      "at_or_above_upper_bound": 4
+    }
+  }
+}

@@ -405,6 +405,7 @@ def test_openapi_paths_are_complete(client):
         "/samples",
         "/samples/{sample_no}",
         "/samples/{sample_no}/reports",
+        "/months/{month}/rebuild",
         "/summary",
         "/retest",
     }

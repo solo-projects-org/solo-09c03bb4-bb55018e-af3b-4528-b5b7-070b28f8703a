@@ -176,6 +176,26 @@ class RetestOut(BaseModel):
     retest_samples: list[str]
 
 
+class RebuildOut(BaseModel):
+    month: str
+    total_samples: int
+    denominator: int
+    retest_count: int
+    retest_samples: list[str]
+    generation: int = Field(
+        ...,
+        description=(
+            "Per-month change counter the rebuilt aggregates are based on. It "
+            "advances on every newly stored revision for this month."
+        ),
+    )
+    attempts: int = Field(
+        ...,
+        description="Recomputations needed because a same-month revision landed mid-rebuild.",
+    )
+    rebuilt_at: str
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -289,6 +309,36 @@ def create_app(db_path: Optional[str] = None) -> FastAPI:
         if outcome["idempotent"]:
             response.status_code = 200
         return outcome
+
+    @app.post(
+        "/months/{month}/rebuild",
+        response_model=RebuildOut,
+        tags=["summary"],
+        summary="Rebuild one sampling month from the highest report revisions",
+        description=(
+            "Recomputes every water sample's current interval (highest revision per "
+            "report), the retest list and the monthly summary/histograms for the given "
+            "month, replacing the stored derived products in one write transaction.\n\n"
+            "Readers keep seeing the previously committed results for the whole "
+            "recomputation; only the final swap is visible, and a failed swap leaves "
+            "the prior results in effect. Submissions for other months do not "
+            "invalidate the rebuild. If a new revision for *this* month is committed "
+            "while recomputing, the rebuild recomputes and includes it; if that keeps "
+            "happening it returns 409 and asks the caller to retry."
+        ),
+        responses={
+            409: {
+                "model": ErrorBody,
+                "description": (
+                    "The month kept receiving new revisions; nothing was replaced. "
+                    "Retry the rebuild."
+                ),
+            },
+            422: {"model": ErrorBody, "description": "Invalid month"},
+        },
+    )
+    def rebuild_month(month: str) -> dict:
+        return service.rebuild_month(path, month)
 
     @app.get(
         "/summary",

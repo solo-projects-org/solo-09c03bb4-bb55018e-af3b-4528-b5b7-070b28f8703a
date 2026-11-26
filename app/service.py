@@ -10,6 +10,7 @@ is added in the same transaction. No other sample is scanned.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -250,6 +251,7 @@ def submit_report(
                 _now(),
             ),
         )
+        _bump_month_generation(conn, sample["sampling_month"])
         _recompute_sample(conn, sample_no, sample["sampling_month"])
         view = _sample_view(conn, sample_no)
         return {
@@ -382,6 +384,199 @@ def _bump_summary(
             "retest_count, updated_at) VALUES (?, ?, ?, ?, ?)",
             (month, total_delta, denominator_delta, retest_delta, _now()),
         )
+
+
+def _bump_month_generation(conn: sqlite3.Connection, month: str) -> None:
+    """Advance the month's change counter inside the writing transaction."""
+    updated = conn.execute(
+        "UPDATE month_generation SET generation = generation + 1 WHERE month = ?",
+        (month,),
+    )
+    if updated.rowcount == 0:
+        conn.execute(
+            "INSERT INTO month_generation(month, generation) VALUES (?, 1)", (month,)
+        )
+
+
+def _month_generation(conn: sqlite3.Connection, month: str) -> int:
+    row = conn.execute(
+        "SELECT generation FROM month_generation WHERE month = ?", (month,)
+    ).fetchone()
+    return row["generation"] if row is not None else 0
+
+
+# ---------------------------------------------------------------------------
+# Full rebuild of one sampling month
+# ---------------------------------------------------------------------------
+
+# Recomputing happens outside the write lock; the replacement only re-checks
+# this month's generation and swaps the three derived products in one short
+# BEGIN IMMEDIATE transaction. A same-month revision landing in between makes
+# the plan stale and forces a fresh read, so the newest revision is always
+# included (or, after exhausting attempts, a retryable 409 is returned).
+REBUILD_MAX_ATTEMPTS = 8
+
+
+class RebuildConflictError(ConflictError):
+    """The month kept changing while rebuilding; the caller should retry."""
+
+
+@dataclass(frozen=True)
+class _RebuildPlan:
+    month: str
+    generation: int
+    states: tuple[tuple[str, Optional[Interval]], ...]
+    total_samples: int
+    denominator: int
+    retest_samples: tuple[str, ...]
+    lower_hist: dict[int, int]
+    max_hist: dict[int, int]
+
+
+def _collect_rebuild_plan(conn: sqlite3.Connection, month: str) -> _RebuildPlan:
+    """Derive one month's state purely from the highest report revisions.
+
+    The caller supplies an open read transaction, so the generation counter
+    and every report row come from one committed WAL snapshot.
+    """
+    generation = _month_generation(conn, month)
+    rows = conn.execute(
+        "SELECT s.sample_no AS sample_no, r.lower AS lower, r.upper AS upper, "
+        "r.upper_inclusive AS upper_inclusive "
+        "FROM samples AS s JOIN reports AS r ON r.sample_no = s.sample_no "
+        "WHERE s.sampling_month = ? AND r.revision = ("
+        "  SELECT MAX(r2.revision) FROM reports AS r2 "
+        "  WHERE r2.report_no = r.report_no"
+        ") ORDER BY s.sample_no, r.report_no",
+        (month,),
+    ).fetchall()
+
+    per_sample: dict[str, list[Interval]] = {}
+    for row in rows:
+        per_sample.setdefault(row["sample_no"], []).append(
+            Interval(row["lower"], row["upper"], bool(row["upper_inclusive"]))
+        )
+
+    states: list[tuple[str, Optional[Interval]]] = []
+    lower_hist: dict[int, int] = {}
+    max_hist: dict[int, int] = {}
+    denominator = 0
+    retest: list[str] = []
+    for sample_no in sorted(per_sample):
+        merged: Optional[Interval] = None
+        for interval in per_sample[sample_no]:
+            merged = interval if merged is None else intersect(merged, interval)
+            if merged is None:
+                break
+        states.append((sample_no, merged))
+        if merged is None:
+            retest.append(sample_no)
+            continue
+        denominator += 1
+        lower_hist[merged.lower] = lower_hist.get(merged.lower, 0) + 1
+        max_hist[merged.max_integer] = max_hist.get(merged.max_integer, 0) + 1
+
+    return _RebuildPlan(
+        month=month,
+        generation=generation,
+        states=tuple(states),
+        total_samples=len(states),
+        denominator=denominator,
+        retest_samples=tuple(retest),
+        lower_hist=lower_hist,
+        max_hist=max_hist,
+    )
+
+
+def _replace_month_aggregates(
+    conn: sqlite3.Connection, plan: _RebuildPlan, now: str
+) -> None:
+    """Atomically replace sample states, retest list and monthly summary."""
+    conn.execute(
+        "DELETE FROM sample_state WHERE sample_no IN "
+        "(SELECT sample_no FROM samples WHERE sampling_month = ?)",
+        (plan.month,),
+    )
+    conn.execute("DELETE FROM monthly_lower_hist WHERE month = ?", (plan.month,))
+    conn.execute("DELETE FROM monthly_max_hist WHERE month = ?", (plan.month,))
+    conn.execute("DELETE FROM monthly_summary WHERE month = ?", (plan.month,))
+
+    for sample_no, interval in plan.states:
+        if interval is None:
+            conn.execute(
+                "INSERT INTO sample_state(sample_no, status, lower, upper, "
+                "upper_inclusive, updated_at) "
+                "VALUES (?, 'retest', NULL, NULL, NULL, ?)",
+                (sample_no, now),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO sample_state(sample_no, status, lower, upper, "
+                "upper_inclusive, updated_at) VALUES (?, 'ok', ?, ?, ?, ?)",
+                (
+                    sample_no,
+                    interval.lower,
+                    interval.upper,
+                    1 if interval.upper_inclusive else 0,
+                    now,
+                ),
+            )
+
+    for value, count in plan.lower_hist.items():
+        conn.execute(
+            f"INSERT INTO {LOWER_HIST}(month, value, sample_count) VALUES (?, ?, ?)",
+            (plan.month, value, count),
+        )
+    for value, count in plan.max_hist.items():
+        conn.execute(
+            f"INSERT INTO {MAX_HIST}(month, value, sample_count) VALUES (?, ?, ?)",
+            (plan.month, value, count),
+        )
+    conn.execute(
+        "INSERT INTO monthly_summary(month, total_samples, denominator, "
+        "retest_count, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            plan.month,
+            plan.total_samples,
+            plan.denominator,
+            len(plan.retest_samples),
+            now,
+        ),
+    )
+
+
+def rebuild_month(path: str, month: str) -> dict:
+    """Recompute one month from report originals and replace its aggregates.
+
+    Readers keep seeing the last committed aggregates for the whole duration
+    of the recomputation; the swap itself is one short write transaction.
+    Report submissions for other months never invalidate this plan because the
+    generation counter is per month.
+    """
+    validate_month(month, "month")
+    for attempt in range(1, REBUILD_MAX_ATTEMPTS + 1):
+        with db.read_transaction(path) as conn:
+            plan = _collect_rebuild_plan(conn, month)
+
+        now = _now()
+        with db.write_transaction(path) as conn:
+            if _month_generation(conn, month) == plan.generation:
+                _replace_month_aggregates(conn, plan, now)
+                return {
+                    "month": month,
+                    "total_samples": plan.total_samples,
+                    "denominator": plan.denominator,
+                    "retest_count": len(plan.retest_samples),
+                    "retest_samples": list(plan.retest_samples),
+                    "generation": plan.generation,
+                    "attempts": attempt,
+                    "rebuilt_at": now,
+                }
+
+    raise RebuildConflictError(
+        f"month {month} received new revisions during the rebuild; "
+        "previous results remain in effect, please retry"
+    )
 
 
 def _bump_hist(
