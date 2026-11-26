@@ -1,0 +1,16 @@
+services:
+  tp-check:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: tp-check:1.0.0
+    ports:
+      - "8000:8000"
+    environment:
+      TP_DB_PATH: /data/tp.sqlite3
+    volumes:
+      - tp-data:/data
+    restart: unless-stopped
+
+volumes:
+  tp-data:
